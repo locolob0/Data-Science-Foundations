@@ -1,0 +1,243 @@
+---
+title: "Covid19 Data Analysis Final"
+author: "S.A.S.Gavini"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+
+```
+
+## Importing data
+
+Importing the time series Covid 19 data from the github.  
+1. Url is being read into url_in.
+2. There are 4 csv files that we are importing.  Recovered is ignored.
+3. Urls variable is a vector of concatenated url_in and each csv file.
+Followed by reading the data in and understanding what is acutally in the files.
+
+```{r JHU_covid19_data}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_US.csv",
+                "time_series_covid19_deaths_global.csv")
+urls <- str_c(url_in,file_names)
+us_cases <- read_csv(urls[1])
+global_cases <- read_csv(urls[2])
+us_deaths <- read_csv(urls[3])
+global_deaths <- read_csv(urls[4])
+```
+
+## Look at the data
+
+Understand the data that needs to be processes and analyzed.
+
+```{r datasummary}
+#head(us_cases)
+#head(global_cases)
+#head(us_deaths)
+#head(global_deaths)
+```
+
+## Tidy and transform datasets
+
+The analysis is to be performed only on date, cases, deaths. These three sections of data are put in their own columns.  Latitude and longitude are eliminated as the name of the country is easier to decipher.  
+
+```{r tidy_global_data}
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long),
+               names_to = "date", values_to = "cases") %>%
+  select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long),
+               names_to = "date", values_to = "deaths") %>%
+  select(-c(Lat, Long))
+```
+
+Combining global cases into deaths per date into one variable called global.
+```{r global_dataset}
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region', Province_State = 'Province/State') %>%
+  mutate(date = mdy(date))
+global <- global %>% filter(cases > 0)
+global
+summary(global)
+```
+
+Tidying of data for US cases and deaths similar to global above.  This allows for making clear analysis of data with less bias and more facts.
+
+```{r tidy_us_data}
+us_cases <- us_cases %>%
+  pivot_longer(cols = -c(UID:Combined_Key),
+               names_to = "date", values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+us_cases
+
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -c(UID:Population),
+               names_to = "date", values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+us_deaths
+```
+
+Combining global cases into deaths per date into one variable called global.
+```{r us_dataset}
+us_new <- us_cases %>%
+  full_join(us_deaths)
+us_new <- us_new %>% filter(cases > 0, deaths > 0)
+#us_new
+summary(us_new)
+```
+Add population column to global data set so comparison with US data set can be done.
+
+``` {r global_with_Population}
+global <- global %>%
+unite("Combined_Key", c(Province_State, Country_Region), sep = ", ", na.rm = TRUE, remove = FALSE)
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/4360e50239b4eb6b22f3a1759323748f36752177/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+global
+```
+
+## Visualization and Analysis of the Global data frame.  
+World totals cases and deaths at a glimpse.
+
+This data summarizes deaths per 100,000 people from Covid19 around the world.  Initially seemed to have an exponential growth but that flatened out.  This probably says something about how data was being collected initially to lack of awareness probably led people being more relaxed.   
+
+```{r visualization_global_dataset}
+world_totals <- global %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_capita = (deaths / Population) * 100000) %>% #Deaths per 100,000 people
+  mutate(cases_per_capita = (cases / Population) * 100000) %>% #Cases per 100,000 people 
+  select(Country_Region, date, cases, deaths, cases_per_capita, deaths_per_capita, Population) %>%
+  ungroup()
+#world_totals
+
+world_totals %>% 
+  ggplot(aes(x =  date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() + 
+  theme(legend.position="bottom", 
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "World Covid-19 Cases and Deaths Trend ", y = NULL)
+```
+
+## Analysis of US Covid 19 Data
+
+This dataset was normalized per 1000 population per province/state.
+
+```{r US_State_Analysis}
+US_State_totals <- us_new %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases), 
+            population = max(Population),
+            cases_per_thou = 1000 * cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+
+
+# Create a time series plot
+ggplot(US_State_totals, aes(x = reorder(Province_State, -deaths_per_thou), y = deaths_per_thou)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Deaths per Thousand by US State",
+       x = "State",
+       y = "Deaths per 1,000 population") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  coord_flip()
+```
+
+States with lower populations naturally had lesser deaths and another interesting observation is states that are larger where people had the opportunity to leave major cities tend to also show lower deaths.  One other interesting observation which may be debatable is the political affiliation of the states.  Red leaning states tend to have fewer deaths compared to blue leaning with the exception being Florida, which didn't even have any lockdowns of any sort.
+
+## Modeling 
+Here we intend to show the case/1000 people vs deaths/1000 people trended against the predicted value.  If the pandemic continued what trend can we possibly expect is what we are trying to achieve from this model.  This is a generalized linear model, which accounts from large populations better than a simple linear model. 
+
+``` {r Predicted_model}
+poisson_model <- glm(deaths_per_thou ~ cases_per_thou, family = poisson, data = US_State_totals)
+summary(poisson_model)
+
+US_State_totals %>% mutate(pred = predict(poisson_model))
+
+#Show the state with the highest predicted deaths/1000 people - American Samoa
+US_State_totals %>% slice_min(cases_per_thou)
+#Show the state with the lowest predicted deaths/ 1000 people - Florida
+US_State_totals %>% slice_min(cases_per_thou)
+
+US_tot_pred <- US_State_totals %>% mutate(pred = predict(poisson_model))
+
+#Plot the predicted data over the actual cases/1000 population.
+US_tot_pred %>% ggplot() + 
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "green") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red") +
+  labs(title = "Predicted Deaths",
+       x = "Cases per 1000 population",
+       y = "Deaths per 1,000 population")
+
+```
+
+Red is the expected trend if the pandemic were to continue.  The prediction in red follows what we saw in the overall trend, which was pretty much flat after the initial spike.
+
+## Possible sources of Bias and Conclusions
+Looking at the top 10 deaths per 1000 by province and state top culprit Puerto Rico doesn't fit the demographic.  Mainly due to the population size compared to other provinces and states.  This could mainly be due to the political environment favoring the states over provinces especially Puerto Rico.  Most of the top states that saw most deaths are in the north east with the exception of Nevada and Arizona.
+1.  Demographics of Nevada, Florida and Arizona tend to be elderly.  None of this was taken into consideration in the analysis of the data.
+2.  North eastern states tend to have high population density and colder climates, which makes people naturally susceptible to flu.  Were the cases differentiated properly between regular and Covid-19 flu?  Given the fact the during the peak of the pandemic most of the deaths were classified as Covid 19.  
+
+Conclusions:
+There are a lot of unknowns in analyzing the Covid 19 data. Undercounting and overcounting of cases and deaths for sure hides the real pandemic data and we would never know how many people truly died of the pandemic itself.  The overall trends do make sense especially world wide trend where there was and exponential increase and flatlining of both cases and deaths.  However, age may have played a bigger role which wasn't even considered here.   
+
+``` {r US_States_Deaths}
+Top_Ten_Deaths <- US_State_totals %>%
+  slice_max(deaths_per_thou, n = 10)%>%
+  select(deaths_per_thou, cases_per_thou, everything())
+
+
+# Reshape the data for plotting
+Top_Ten_Deaths_Long <- Top_Ten_Deaths %>%
+  select(Province_State, deaths_per_thou, cases_per_thou) %>%
+  pivot_longer(cols = c(deaths_per_thou, cases_per_thou),
+               names_to = "legend",
+               values_to = "value")
+
+# Create the plot
+ggplot(Top_Ten_Deaths_Long, 
+       aes(x = reorder(Province_State, -value), y = value, fill = legend)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("deaths_per_thou" = "darkred", "cases_per_thou" = "steelblue"),
+                    labels = c("Deaths", "Cases")) +
+  geom_text(aes(label = round(value, 1)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3) +
+  labs(title = "Top 10 States by Deaths per Thousand",
+       subtitle = "Comparing Deaths and Cases per 1,000 population",
+       x = "State",
+       y = "Per 1,000 population",
+       fill = "Legend") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top") +
+  coord_flip()
+```
+
